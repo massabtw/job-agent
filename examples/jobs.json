@@ -1,0 +1,32 @@
+[
+  {
+    "platform": "gupy",
+    "external_id": "100000000001",
+    "url": "https://example.gupy.io/jobs/100000000001",
+    "company": "EXEMPLO FICTÍCIO — NÃO CANDIDATAR",
+    "title": "Backend .NET Júnior",
+    "seniority": "junior",
+    "stack": [".NET", "SQL", "APIs REST", "Git", "Azure"],
+    "mode": "remote",
+    "description": "Anúncio fictício usado exclusivamente para testar o agente.",
+    "active": true,
+    "requirements_verified": true,
+    "requirements": [
+      {"fact": "enrolled", "expected": true, "description": "Graduação em andamento"}
+    ],
+    "questions": ["Qual sua previsão de conclusão?"]
+  },
+  {
+    "platform": "indeed",
+    "external_id": "localdemo",
+    "url": "https://br.indeed.com/viewjob?jk=localdemo",
+    "company": "EXEMPLO FICTÍCIO — NÃO CANDIDATAR",
+    "title": "Backend .NET Senior",
+    "seniority": "senior",
+    "stack": ["C#", "SQL"],
+    "mode": "remote",
+    "description": "Anúncio fictício usado exclusivamente para testar descarte.",
+    "active": true,
+    "required_years": 5
+  }
+]
