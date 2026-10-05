@@ -2,6 +2,7 @@ import json
 import re
 import sqlite3
 import time
+import unicodedata
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path
@@ -46,7 +47,7 @@ def extract(title: str, html: str) -> tuple[str, list[str], str, list[dict[str, 
     patterns = {
         ".NET": r"(?i)(?<!\w)\.net\b", "C#": r"(?i)\bc#",
         "SQL": r"(?i)\bsql\b", "Git": r"(?i)\bgit\b", "Azure": r"(?i)\bazure\b",
-        "APIs REST": r"(?i)\brest(?:ful)?\b",
+        "APIs REST": r"(?i)\brest(?:ful)?\b", "Python": r"(?i)\bpython\b",
     }
     for name, pattern in patterns.items():
         for line in [title, *text.splitlines()]:
@@ -56,13 +57,14 @@ def extract(title: str, html: str) -> tuple[str, list[str], str, list[dict[str, 
                                  "classification": "mention_only_not_mandatory"})
                 break
     seniority = "unknown"
+    clean_title = "".join(c for c in unicodedata.normalize("NFKD", title) if not unicodedata.combining(c))
     for level, pattern in (
         ("senior", r"\b(senior|staff|lead|principal)\b"),
-        ("intern", r"\b(intern|internship|est[aá]gio)\b"),
-        ("trainee", r"\btrainee\b"), ("junior", r"\b(junior|j[uú]nior|jr)\b"),
+        ("intern", r"\b(intern|internship|estagio)\b"),
+        ("trainee", r"\btrainee\b"), ("junior", r"\b(junior|jr)\b"),
         ("entry", r"\bentry[ -]level\b"),
     ):
-        if re.search(pattern, title, re.IGNORECASE):
+        if re.search(pattern, clean_title, re.IGNORECASE) or re.search(pattern, title, re.IGNORECASE):
             seniority = level
             evidence.append({"field": "seniority", "value": level, "excerpt": title,
                              "classification": "title_signal"})

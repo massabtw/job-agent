@@ -1,6 +1,6 @@
-# Especificação Técnica: Conectores de Navegador para Gupy e Indeed
+# Especificação Técnica: Conectores de Navegador para Gupy e Indeed (Busca & Automação)
 
-**Status**: Proposta para Implementação  
+**Status**: Especificação Aprovada  
 **Skill**: `to-spec`  
 **Data**: 2026-10-05  
 
@@ -9,28 +9,33 @@
 ## 1. Resumo & Objetivo
 
 Construir os conectores de automação de navegador (baseados em Playwright) para as plataformas **Gupy** (`*.gupy.io`) e **Indeed** (`*.indeed.com`), permitindo ao `job-agent`:
-1. Navegar até o anúncio da vaga e extrair todos os dados estruturados (descrição, requisitos, modalidade, localidade e perguntas do formulário).
-2. Avaliar a compatibilidade contra o [`profile.json`](file:///c:/Users/m84832/Desktop/job-agent/profile.json) utilizando as regras de `job_agent.evaluation`.
-3. Detectar bloqueios que exigem intervenção humana obrigatória (*Human-in-the-Loop*).
-4. Realizar o preenchimento seguro de dados cadastrais e anexo de currículo.
-5. Exigir confirmação humana antes de qualquer submissão real, registrando comprovante no histórico SQLite.
+1. **Buscar vagas ativas**: Consultar os portais de busca da Gupy e Indeed a partir de palavras-chave do perfil (ex.: "backend", "c#", ".net", "python") e extrair anúncios para a triagem.
+2. **Inspeção estruturada**: Navegar até o anúncio da vaga e extrair todos os dados estruturados (descrição, requisitos, modalidade, localidade e perguntas do formulário).
+3. **Triagem de compatibilidade**: Avaliar a vaga contra o `profile.json` utilizando o motor determinístico `job_agent.evaluation` (score mínimo 80).
+4. **Execução Autônoma com Evasão Stealth & Sessão Persistente**:
+   - Reutilizar sessão autenticada persistente (`user_data_dir`) e flags de evasão stealth para mitigar CAPTCHAs repetidos e bloqueios Cloudflare.
+   - Preencher dados cadastrais e currículo a partir do perfil validado.
+   - Efetuar a submissão de forma automatizada quando todos os dados estiverem completos.
+5. **Tratamento Gracioso de Bloqueios Irrecuperáveis**: Caso surja um CAPTCHA irrecuperável ou pergunta não mapeada, registrar evidência diagnóstica (screenshot e log), marcar `BLOCKED_CAPTCHA` ou `NEEDS_REVIEW` no SQLite e prosseguir de forma resiliente para as próximas vagas da fila sem travar a execução.
 
 ---
 
-## 2. Invariantes e Regras de Segurança
+## 2. Invariantes, Segurança e Evasão
 
-1. **Envio Não-Autônomo sem Confirmação**: O robô **nunca** deve clicar no botão final de submissão sem validação explícita do usuário no terminal ou no navegador.
-2. **Pausa para Intervenção Humana (*Human-in-the-Loop*)**: O fluxo deve pausar imediatamente e solicitar a ação do usuário sempre que detectar:
-   - Desafios antibot (Cloudflare, reCAPTCHA, hCaptcha);
-   - Solicitação de login, senha ou autenticação de dois fatores (MFA/2FA);
-   - Perguntas de pretensão salarial;
-   - Perguntas adicionais sem resposta cadastrada em `profile.answers`;
-   - Testes avaliativos, questionários técnicos ou testes de perfil comportamental.
-3. **Uso Exclusivo de Dados Aprovados**: O preenchimento automático limita-se a campos mapeados de `profile.identity` (Nome, E-mail, Telefone com +55 e DDD 41, Cidade, URLs do GitHub e LinkedIn) e o arquivo de currículo cujo SHA-256 corresponda a `profile.resume_sha256`.
-4. **Fila e Histórico Transacional**:
-   - Cada tentativa deve registrar transição no banco SQLite: `READY` → `RESERVED` → `SUBMITTING` → `SUBMITTED`.
-   - Se ocorrer timeout ou falha de rede antes da tela de sucesso, o status deve ser registrado como `SUBMISSION_UNCERTAIN` com evidência textual do erro, bloqueando novas tentativas até conferência.
-   - Limite rígido de no máximo 5 candidaturas por lote.
+1. **Sessão Persistente (`user_data_dir`)**:
+   - Manter dados de perfil de navegador e cookies em `data/browser_session` (ignorado no `.gitignore`).
+   - O usuário faz login nas plataformas uma vez pelo navegador persistente ou importa cookies; as sessões subsequentes reutilizam a autenticação, minimizando desafios Cloudflare Turnstile, reCAPTCHA e telas de login por SMS/MFA.
+2. **Playwright Stealth & Evasão**:
+   - Mascarar `navigator.webdriver`, habilitar plugins e manter User-Agent realista.
+   - Argumentos do Chromium: `--disable-blink-features=AutomationControlled`, `--start-maximized`.
+3. **Resiliência e Continuidade sem Travamentos**:
+   - Se um antibot/CAPTCHA bloquear a página e não houver como resolver sem intervenção, o agente salva screenshot em `data/screenshots/`, registra a ocorrência no histórico com `SUBMISSION_UNCERTAIN` / `BLOCKED_CAPTCHA` e passa para a próxima vaga da fila.
+4. **Uso Exclusivo de Dados Aprovados**:
+   - O preenchimento automático limita-se a campos mapeados de `profile.identity` (Nome, E-mail, Telefone, Cidade, URLs do GitHub e LinkedIn) e `profile.answers`.
+   - O upload do currículo valida previamente o SHA-256 contra `profile.resume_sha256`.
+5. **Fila e Histórico Transacional**:
+   - Transições no SQLite: `READY` → `RESERVED` → `SUBMITTING` → `SUBMITTED` (ou `SUBMISSION_UNCERTAIN` / `BLOCKED_CAPTCHA`).
+   - Limite configurável por lote (default: 5 candidaturas por execução).
 
 ---
 
@@ -40,86 +45,75 @@ Construir os conectores de automação de navegador (baseados em Playwright) par
 job_agent/
 └── browser/
     ├── __init__.py
-    ├── session.py        # Inicialização e contexto seguro do Playwright (headless/headed)
-    ├── inspector.py      # Extração de detalhes da vaga e detecção de bloqueios
-    ├── filler.py         # Preenchimento de campos padrão e upload de currículo
-    ├── gupy.py           # Conector específico para formulários e fluxos da Gupy
-    └── indeed.py         # Conector específico para fluxos Indeed Apply
+    ├── session.py        # Gerenciador de contexto Playwright (sessão persistente + evasão stealth)
+    ├── search.py         # Busca de anúncios ativos no Gupy e Indeed por palavras-chave
+    ├── inspector.py      # Extração de detalhes da vaga e detecção de bloqueios/formulários
+    ├── filler.py         # Preenchimento determinístico de campos e upload de currículo
+    ├── gupy.py           # Fluxo completo Gupy: busca, leitura, preenchimento e submissão
+    └── indeed.py         # Fluxo completo Indeed: busca, leitura, preenchimento e submissão
 ```
 
-### 3.1. `session.py` (Gerenciador de Sessão Playwright)
-- Função para criar instâncias de `BrowserContext` isoladas.
-- Suporte a alternância entre `headless=True` (para inspeção e extração rápida) e `headless=False` (quando houver necessidade de intervenção humana ou confirmação).
-- Configuração de timeouts previsíveis (ex.: 15 segundos para localização de seletores).
+### 3.1. `session.py` (Gerenciador de Sessão & Stealth)
+- Inicializa Chromium com `launch_persistent_context` apontando para `data/browser_session`.
+- Injeta scripts de evasão (remoção de `navigator.webdriver`, spoof de `window.chrome`).
+- Suporta modos: `headless=False` (padrão para estabilidade antibot) e `headless=True`.
 
-### 3.2. `inspector.py` (Inspeção & Detecção de Bloqueios)
-- **Extração da Vaga**:
-  - Título, nome da empresa, requisitos, modalidade, localidade e texto completo.
-  - Converte as informações extraídas para o modelo `Job` existente.
-- **Classificação de Bloqueios**:
-  - `Blocker.CAPTCHA`: Detecção de `iframe[src*="recaptcha"]`, `iframe[src*="turnstile"]`, `iframe[src*="hcaptcha"]` ou elementos de desafio.
-  - `Blocker.AUTH`: Redirecionamento para tela de login ou pedido de código/SMS.
-  - `Blocker.SALARY`: Campo de texto contendo termos como *"pretensão salarial"*, *"remuneração pretendida"*, *"salary"*.
-  - `Blocker.ASSESSMENT`: Detecção de etapas com testes de lógica ou fit cultural.
-  - `Blocker.UNKNOWN_QUESTION`: Campos de perguntas de formulário não catalogadas.
+### 3.2. `search.py` (Busca Ativa de Vagas)
+- **Gupy**: Consulta o portal de busca Gupy (`portal.gupy.io/vagas`) e coleta links `/jobs/:id`.
+- **Indeed**: Consulta a busca Indeed (`br.indeed.com/jobs`) e coleta links canônicos `viewjob?jk=:id`.
+- Converte os links para instâncias `Job` e adiciona ao banco de dados e fila.
 
-### 3.3. `filler.py` (Preenchedor de Formulário)
-- Mapeamento determinístico de formulário baseado em rótulos (`label` acessível, `name`, `placeholder`):
-  - Nome completo → `profile.identity["full_name"]`
-  - E-mail → `profile.identity["email"]`
-  - Telefone → `profile.identity["phone"]`
-  - Cidade / Estado → `profile.identity["city"]`, `profile.identity["state"]`
-  - Links profissionais → `profile.identity["linkedin_url"]`, `profile.identity["github_url"]`
-  - Upload de Currículo → `input[type="file"]` recebe o arquivo em `profile.resume_path`.
-- Validação pós-preenchimento: verifica que o valor preenchido reflete o dado do perfil antes de prosseguir.
+### 3.3. `inspector.py` (Inspeção & Detecção de Bloqueios)
+- Extrai título, empresa, localização, modalidade, requisitos e texto da vaga.
+- Converte em objeto `Job` estruturado para o motor `job_agent.evaluation`.
+- Detecta bloqueios antibot (`iframe[src*="recaptcha"]`, `iframe[src*="turnstile"]`, Cloudflare challenge).
 
-### 3.4. `gupy.py` (Conector Gupy)
-- Suporta URLs no formato `https://*.gupy.io/jobs/:id` e páginas de aplicação `/apply`.
-- Lê a descrição estruturada, requisitos obrigatórios vs. desejáveis e termos de consentimento LGPD.
-- Navega pelas etapas do fluxo de candidatura da Gupy.
+### 3.4. `filler.py` (Preenchimento Automatizado)
+- Preenche inputs cadastrais com base em seletores flexíveis (labels, placeholders, names):
+  - Nome completo, e-mail, telefone, localidade, links do LinkedIn/GitHub.
+  - Upload do arquivo de currículo em `profile.resume_path` garantindo hash SHA-256 íntegro.
+  - Responde perguntas mapeadas diretamente em `profile.answers`.
 
-### 3.5. `indeed.py` (Conector Indeed)
-- Suporta URLs no formato `https://*.indeed.com/viewjob?jk=:id`.
-- Suporta candidaturas com selo "Candidatura Simplificada" (*Indeed Apply*).
-- Identifica quando a vaga redireciona para site externo de empresa (canal `company`), marcando o destino adequado.
+### 3.5. `gupy.py` e `indeed.py` (Conectores Especializados)
+- **Gupy**: Navega pelas etapas do fluxo de candidatura da Gupy (`/apply`), preenche termos LGPD, etapas de dados e executa o clique de confirmação.
+- **Indeed**: Opera sobre fluxos "Candidatura Simplificada" (*Indeed Apply*), avançando pelas etapas do modal e submetendo a aplicação.
 
 ---
 
-## 4. Novos Comandos de Linha de Comando (CLI)
+## 4. Comandos de Linha de Comando (CLI)
 
-1. **Inspecionar Vaga sem Preencher**:
+1. **Buscar vagas ativas nos portais**:
+   ```powershell
+   & '.\.venv\Scripts\python.exe' -X utf8 -m job_agent search --platform gupy --query "backend .NET"
+   & '.\.venv\Scripts\python.exe' -X utf8 -m job_agent search --platform indeed --query "desenvolvedor python"
+   ```
+
+2. **Inspecionar Vaga Individual**:
    ```powershell
    & '.\.venv\Scripts\python.exe' -X utf8 -m job_agent inspect --url "https://empresa.gupy.io/jobs/123456"
    ```
-   - Abre a vaga em modo rápido, extrai dados, avalia compatibilidade com o perfil e lista o score, motivos e eventuais bloqueios encontrados.
 
-2. **Candidatura Assistida (*Interactive Apply*)**:
+3. **Candidatura Automatizada**:
    ```powershell
-   & '.\.venv\Scripts\python.exe' -X utf8 -m job_agent apply --url "https://empresa.gupy.io/jobs/123456"
+   & '.\.venv\Scripts\python.exe' -X utf8 -m job_agent auto-apply --url "https://empresa.gupy.io/jobs/123456"
+   # ou processar fila em lote:
+   & '.\.venv\Scripts\python.exe' -X utf8 -m job_agent process-queue --limit 5
    ```
-   - Executa a inspeção e triagem.
-   - Se `DISCARDED`: exibe os motivos e encerra com código 0.
-   - Se `NEEDS_REVIEW` por bloqueio: abre a janela para intervenção humana e aguarda o usuário concluir a etapa bloqueante.
-   - Se os dados estiverem completos: preenche os campos cadastrais e anexa o currículo.
-   - Solicita confirmação no terminal: `"Deseja confirmar o envio desta candidatura? (s/n)"`.
-   - Se aprovado: conclui o envio, extrai evidência textual/recibo da tela e salva em `history.sqlite3` com status `SUBMITTED`.
 
 ---
 
 ## 5. Limites de Escopo (O que NÃO está incluso nesta fase)
 
-- **Envio 100% autônomo sem supervisão**: Não será suportado; toda candidatura exige presença do usuário para auditoria ou confirmação.
-- **Quebra automática de CAPTCHA**: Não será implementada; desafios antibot sempre requerem resolução manual do usuário.
-- **Armazenamento de senhas**: Não haverá login automático por senha no código.
-- **Portais fora de Gupy e Indeed**: Plataformas como Catho, Vagas.com ou formulários proprietários complexos permanecem fora do escopo imediato.
+- **InfoJobs**: Planejado para a próxima iteração logo após a consolidação de Gupy e Indeed.
+- **Resolução de testes técnicos complexos/provas**: Etapas que exigem testes de lógica/habilidade de terceiros serão marcadas como `NEEDS_REVIEW` ou puladas com log explicativo.
+- **Armazenamento de senhas em texto puro**: A autenticação nas plataformas ocorre via perfil de sessão persistente do navegador, nunca salvando credenciais no código.
 
 ---
 
 ## 6. Critérios de Aceitação e Testes
 
-- [ ] Teste unitário e de integração com página HTML mockada reproduzindo formulários Gupy e Indeed sem acesso à rede.
-- [ ] Validador de bloqueios disparando corretamente para campos de pretensão salarial e perguntas desconhecidas.
-- [ ] Upload de arquivo mockado validando a conferência do hash SHA-256 antes da anexação.
-- [ ] Gravação determinística de estados no SQLite (`RESERVED` → `SUBMITTING` → `SUBMITTED` ou `SUBMISSION_UNCERTAIN`).
+- [ ] Suporte a `launch_persistent_context` com injeção de evasão de automação.
+- [ ] Testes unitários para extração e mapeamento de campos com páginas HTML de exemplo (fixtures locais).
+- [ ] Verificação de integridade de currículo (SHA-256) antes do upload.
+- [ ] Tratamento determinístico de bloqueios: salvar screenshot e marcar `BLOCKED_CAPTCHA` sem crashar a execução.
 - [ ] `pytest -q` e `ruff check .` passando com 100% de sucesso.
-
