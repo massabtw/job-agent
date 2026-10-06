@@ -4,25 +4,16 @@ from pathlib import Path
 from playwright.sync_api import Locator, Page
 
 from ..models import Profile
+from .fields import control_label, identity_field
 
 
 def _match_identity_value(label_or_name: str, identity: dict[str, str]) -> str | None:
-    text = label_or_name.lower().replace("-", " ").replace("_", " ")
-
-    if any(k in text for k in ("nome completo", "fullname", "full name", "nome")):
-        return identity.get("full_name")
-    if any(k in text for k in ("e mail", "email", "e-mail")):
-        return identity.get("email")
-    if any(k in text for k in ("telefone", "celular", "phone", "whatsapp")):
-        return identity.get("phone")
-    if any(k in text for k in ("cidade", "city", "municipio", "município")):
-        return identity.get("city")
-    if "linkedin" in text:
-        return identity.get("linkedin_url")
-    if "github" in text:
-        return identity.get("github_url")
-
-    return None
+    field = identity_field(label_or_name)
+    if field in {"first_name", "last_name"}:
+        parts = identity.get("full_name", "").strip().split(maxsplit=1)
+        return identity.get(field) or (parts[0 if field == "first_name" else 1]
+                                       if len(parts) == 2 else None)
+    return identity.get(field) if field else None
 
 
 def _find_answer(question_text: str, answers: dict[str, str]) -> str | None:
@@ -36,31 +27,46 @@ def _find_answer(question_text: str, answers: dict[str, str]) -> str | None:
 def fill_form(page: Page, profile: Profile) -> dict[str, str]:
     """Fill candidate identity and mapped answers into form inputs."""
     filled: dict[str, str] = {}
-    inputs = page.locator("input:not([type='hidden']):not([type='submit']):not([type='file']), textarea").all()
+    inputs = page.locator("input, textarea, select").all()
 
     for inp in inputs:
         if (not inp.is_visible() or not inp.is_enabled()
-                or inp.get_attribute("type") in {"checkbox", "radio", "password", "button", "reset"}):
+                or inp.get_attribute("type") in {"hidden", "file", "submit", "search", "password", "button", "reset"}):
             continue
         inp_id = inp.get_attribute("id") or ""
         inp_name = inp.get_attribute("name") or ""
         placeholder = inp.get_attribute("placeholder") or ""
 
-        # Find associated label text if present
-        label_text = ""
-        if inp_id:
-            label_loc = page.locator(f"label[for='{inp_id}']")
-            if label_loc.count() > 0:
-                label_text = label_loc.first.inner_text().strip()
-
-        combined_desc = f"{label_text} {inp_name} {inp_id} {placeholder}".strip()
-
-        value_to_fill = _match_identity_value(combined_desc, profile.identity)
-        if not value_to_fill and label_text:
-            value_to_fill = _find_answer(label_text, profile.answers)
+        label_text = control_label(inp)
+        value_to_fill = _find_answer(label_text, profile.answers)
+        if value_to_fill is None:
+            # A labelled question must never fall back to a misleading name/id attribute.
+            candidates = [label_text] if label_text else [inp_name, inp_id, placeholder]
+            value_to_fill = next((value for text in candidates
+                                  if (value := _match_identity_value(text, profile.identity))), None)
+            if inp_name == "names-first-name" and identity_field(label_text) == "full_name":
+                value_to_fill = _match_identity_value("first name", profile.identity)
 
         if value_to_fill:
-            inp.fill(value_to_fill)
+            kind = inp.get_attribute("type")
+            if kind == "checkbox":
+                if value_to_fill.strip().casefold() not in {"sim", "yes", "aceito", "i agree"}:
+                    continue
+                inp.check()
+            elif kind == "radio":
+                if control_label(inp, group=False).casefold() != value_to_fill.strip().casefold():
+                    continue
+                inp.check()
+            elif inp.evaluate("element => element.tagName") == "SELECT":
+                options = inp.locator("option").all()
+                matches = [option for option in options
+                           if option.inner_text().strip().casefold() == value_to_fill.strip().casefold()
+                           and option.is_enabled()]
+                if len(matches) != 1:
+                    continue
+                inp.select_option(value=matches[0].get_attribute("value") or matches[0].inner_text())
+            else:
+                inp.fill(value_to_fill)
             key = inp_name or inp_id or label_text or "field"
             filled[key] = value_to_fill
 

@@ -47,8 +47,8 @@ def approve_jobs(store, jobs: list[Job], profile: Profile, evidence: str):
     for job in jobs:
         validate_source(job)
         channel, destination = validate_destination(job)
-        if channel not in {"gupy", "indeed"} or destination != str(job.url):
-            raise ValueError("Aprovação suporta somente destino original Gupy/Indeed.")
+        if job.platform != "indeed" or channel != "indeed" or destination != str(job.url):
+            raise ValueError("Aprovação suporta somente destino original Indeed.")
         result = evaluate(job, profile)
         if result.status != "READY":
             raise ValueError("Vaga não está pronta: " + "; ".join(result.reasons))

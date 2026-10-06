@@ -32,6 +32,27 @@ def job_from(page, platform, description, notice=""):
     return extract_indeed_job(page, "https://br.indeed.com/viewjob?jk=abc")
 
 
+def test_indeed_modern_layout(page):
+    page.set_content('''<nav>Cookies e outras vagas SQL</nav>
+        <h5 data-testid="vj-job-title">Junior Python Developer - Remote Work</h5>
+        <div data-testid="company-info-metadata">Empresa Teste<br>·<br>4.0<br>Curitiba, PR<br>Home Office</div>
+        <div data-testid="viewjob-job-content">Dados da vaga<br>Trabalho remoto<br>
+        Descrição completa da vaga<br>Develop Python applications with Git.</div>''')
+    job = extract_indeed_job(page, "https://br.indeed.com/viewjob?jk=abc")
+    assert job.title == "Junior Python Developer - Remote Work"
+    assert job.company == "Empresa Teste"
+    assert job.location == "Curitiba, PR"
+    assert job.mode == "remote"
+    assert "Cookies" not in job.description
+    assert "Python" in job.description
+
+
+def test_indeed_missing_posting_is_not_a_generic_vacancy(page):
+    page.set_content('<h1>Não foi possível encontrar a página</h1><p>Buscar vagas</p>')
+    with pytest.raises(ValueError, match="Anúncio Indeed"):
+        extract_indeed_job(page, "https://br.indeed.com/viewjob?jk=abc")
+
+
 @pytest.mark.parametrize("platform", ["gupy", "indeed"])
 @pytest.mark.parametrize("text,years", [
     ("Experiência mínima de 4 anos com .NET.", 4),

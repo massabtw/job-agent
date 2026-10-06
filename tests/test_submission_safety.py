@@ -92,10 +92,10 @@ def test_queue_review_is_not_processed(tmp_path, monkeypatch, profile, capsys):
 
     path = tmp_path / "db.sqlite3"
     store = Store(path)
-    job = Job(platform="gupy", external_id="123", url=URL, company="Teste", title="Backend",
+    job = Job(platform="indeed", external_id="123", url="https://br.indeed.com/viewjob?jk=123", company="Teste", title="Backend",
               seniority="junior", stack=[], description="Teste")
     key = store.register(job)
-    store.enqueue(key, "gupy", URL)
+    store.enqueue(key, "indeed", "https://br.indeed.com/viewjob?jk=123")
     store.close()
     profile_path = tmp_path / "profile.json"
     profile_path.write_text(profile.model_dump_json(), encoding="utf-8")
@@ -108,7 +108,7 @@ def test_queue_review_is_not_processed(tmp_path, monkeypatch, profile, capsys):
         yield Context()
 
     monkeypatch.setattr(cli, "create_browser_context", context)
-    monkeypatch.setattr(cli, "apply_gupy", lambda *a, **k: pytest.fail("Fila não aprovada"))
+    monkeypatch.setattr(cli, "apply_indeed", lambda *a, **k: pytest.fail("Fila não aprovada"))
     monkeypatch.setattr("sys.argv", ["job_agent", "--db", str(path), "process-queue",
                                      "--profile", str(profile_path)])
     assert cli.main() == 0
@@ -122,7 +122,7 @@ def test_cli_reserves_and_persists_uncertain(tmp_path, monkeypatch, profile, cap
     path = tmp_path / "db.sqlite3"
     profile_path = tmp_path / "profile.json"
     profile_path.write_text(profile.model_dump_json(), encoding="utf-8")
-    job = Job(platform="gupy", external_id="123", url=URL, company="Teste",
+    job = Job(platform="indeed", external_id="123", url="https://br.indeed.com/viewjob?jk=123", company="Teste",
               title="Backend .NET Junior", seniority="junior",
               stack=profile.skills, description="Teste", mode="remote",
               active=True, requirements_verified=True)
@@ -140,13 +140,13 @@ def test_cli_reserves_and_persists_uncertain(tmp_path, monkeypatch, profile, cap
         return "SUBMISSION_UNCERTAIN", job, "Sem confirmação local"
 
     monkeypatch.setattr(cli, "create_browser_context", context)
-    monkeypatch.setattr(cli, "apply_gupy", apply)
+    monkeypatch.setattr(cli, "apply_indeed", apply)
     monkeypatch.setattr("sys.argv", ["job_agent", "--db", str(path), "auto-apply",
-                                     "--url", URL, "--profile", str(profile_path)])
+                                     "--url", "https://br.indeed.com/viewjob?jk=123", "--profile", str(profile_path)])
     assert cli.main() == 1
     store = Store(path)
     try:
-        assert store.application_status("gupy:123") == "SUBMISSION_UNCERTAIN"
+        assert store.application_status("indeed:123") == "SUBMISSION_UNCERTAIN"
         assert store.queue_items()[0]["state"] == "SUBMISSION_UNCERTAIN"
     finally:
         store.close()
@@ -182,7 +182,7 @@ def test_guarded_apply_prevents_repetition_and_counts_uncertain(tmp_path, monkey
     calls = []
 
     def apply(page, url, profile, before_submit, **kwargs):
-        job = Job(platform="gupy", external_id=url.rsplit("/", 1)[1], url=url,
+        job = Job(platform="indeed", external_id=url.rsplit("=", 1)[1], url=url,
                   company="Teste", title="Backend .NET Junior", seniority="junior",
                   stack=profile.skills, description="Fixture", mode="remote", active=True,
                   requirements_verified=True)
@@ -192,12 +192,12 @@ def test_guarded_apply_prevents_repetition_and_counts_uncertain(tmp_path, monkey
         calls.append(url)
         return "SUBMISSION_UNCERTAIN", job, "Timeout local"
 
-    monkeypatch.setattr(cli, "apply_gupy", apply)
+    monkeypatch.setattr(cli, "apply_indeed", apply)
     try:
-        assert cli.guarded_apply(None, URL, profile, store, "one")[0] == "SUBMISSION_UNCERTAIN"
-        assert cli.guarded_apply(None, URL, profile, store, "one")[0] == "NEEDS_REVIEW"
-        assert cli.guarded_apply(None, URL + "4", profile, store, "one")[0] == "LIMIT_REACHED"
-        assert calls == [URL]
+        assert cli.guarded_apply(None, "https://br.indeed.com/viewjob?jk=123", profile, store, "one")[0] == "SUBMISSION_UNCERTAIN"
+        assert cli.guarded_apply(None, "https://br.indeed.com/viewjob?jk=123", profile, store, "one")[0] == "NEEDS_REVIEW"
+        assert cli.guarded_apply(None, "https://br.indeed.com/viewjob?jk=1234", profile, store, "one")[0] == "LIMIT_REACHED"
+        assert calls == ["https://br.indeed.com/viewjob?jk=123"]
     finally:
         store.close()
 
@@ -208,18 +208,18 @@ def test_ready_queue_returns_to_review_when_validation_fails(tmp_path, monkeypat
     from job_agent.storage import Store
 
     store = Store(tmp_path / "db.sqlite3")
-    job = Job(platform="gupy", external_id="123", url=URL, company="Teste", title="Backend",
+    job = Job(platform="indeed", external_id="123", url="https://br.indeed.com/viewjob?jk=123", company="Teste", title="Backend",
               seniority="junior", stack=[], description="Fixture")
     key = store.register(job)
-    store.enqueue(key, "gupy", URL)
+    store.enqueue(key, "indeed", "https://br.indeed.com/viewjob?jk=123")
     store.connection.execute("UPDATE queue SET state='READY' WHERE key=?", (key,))
     store.connection.commit()
     store.create_batch("batch", 1)
-    monkeypatch.setattr(cli, "apply_gupy", lambda *a, **kw: (
+    monkeypatch.setattr(cli, "apply_indeed", lambda *a, **kw: (
         "NEEDS_REVIEW", job, "Requisitos não confirmados"
     ))
     try:
-        cli.guarded_apply(None, URL, profile, store, "batch", expected_key=key)
+        cli.guarded_apply(None, "https://br.indeed.com/viewjob?jk=123", profile, store, "batch", expected_key=key)
         assert store.queue_items()[0]["state"] == "NEEDS_REVIEW"
         assert store.queue_items()[0]["evidence"] == "Requisitos não confirmados"
     finally:

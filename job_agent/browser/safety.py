@@ -14,7 +14,7 @@ def form_pending(page: Page) -> bool:
     """Never infer consent or answers for required fields."""
     return bool(page.locator(
         'input:visible:invalid, textarea:visible:invalid, select:visible:invalid, '
-        'input[type="checkbox"]:visible:not(:checked), input[type="radio"]:visible'
+        'input[type="checkbox"]:visible:not(:checked)'
     ).count())
 
 

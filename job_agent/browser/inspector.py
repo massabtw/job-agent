@@ -6,6 +6,7 @@ from playwright.sync_api import Page
 from ..discovery import extract
 from ..evaluation import normalize
 from ..models import Job
+from .fields import control_label, identity_field
 
 
 def extract_experience(description: str) -> tuple[float | None, list[dict[str, str]]]:
@@ -64,15 +65,14 @@ def closed_notice(page: Page) -> tuple[bool | None, list[dict[str, str]]]:
 
 
 def extract_questions(page: Page) -> tuple[list[str], list[dict[str, str]]]:
-    """Inspect labelled controls inside forms without reading candidate answers."""
-    identity_labels = {
-        "nome", "nome completo", "full name", "email", "e-mail", "e mail",
-        "telefone", "celular", "phone", "cidade", "city", "pais", "country",
-        "linkedin", "perfil do linkedin", "github", "perfil do github",
-    }
+    """Inspect forms and SmartApply controls without reading candidate answers."""
     questions = []
     evidence = []
-    controls = page.locator("form input, form textarea, form select").all()
+    parsed = urlparse(page.url)
+    selector = ("input, textarea, select" if parsed.scheme == "https"
+                and parsed.hostname == "smartapply.indeed.com"
+                else "form input, form textarea, form select")
+    controls = page.locator(selector).all()
     for control in controls:
         if not control.is_visible() or not control.is_enabled():
             continue
@@ -80,26 +80,12 @@ def extract_questions(page: Page) -> tuple[list[str], list[dict[str, str]]]:
             "hidden", "submit", "button", "reset", "password", "file", "search",
         }:
             continue
-        label = control.evaluate(r"""element => {
-            const text = node => {
-                const clone = node.cloneNode(true);
-                clone.querySelectorAll('input, textarea, select, button, script, style')
-                     .forEach(child => child.remove());
-                return clone.textContent.trim();
-            };
-            const refs = (element.getAttribute('aria-labelledby') || '').split(/\s+/)
-                .filter(Boolean).map(id => document.getElementById(id)).filter(Boolean);
-            if (refs.length) return refs.map(text).join(' ');
-            const aria = element.getAttribute('aria-label');
-            if (aria) return aria.trim();
-            return Array.from(element.labels || []).map(text).join(' ');
-        }""")
-        label = " ".join(label.split())
+        label = control_label(control)
         if not label:
             evidence.append({"field": "questions", "value": "unknown", "excerpt": "",
                              "classification": "unlabelled_control_needs_review"})
             continue
-        if normalize(label).rstrip(" *:") in identity_labels or label in questions:
+        if identity_field(label) is not None or label in questions:
             continue
         questions.append(label)
         evidence.append({"field": "questions", "value": label, "excerpt": label,
@@ -122,7 +108,13 @@ def detect_blockers(page: Page) -> list[str]:
         "#cf-challenge-body",
     ]
     for sel in captcha_selectors:
-        if page.locator(sel).count() > 0:
+        candidates = page.locator(sel).all()
+        if sel == 'iframe[src*="recaptcha"]':
+            candidates = [frame for frame in candidates if not (
+                urlparse(frame.get_attribute("src") or "").path.endswith("/anchor")
+                and parse_qs(urlparse(frame.get_attribute("src") or "").query).get("size") == ["invisible"]
+            )]
+        if candidates:
             blockers.append("CAPTCHA")
             break
 
@@ -271,17 +263,30 @@ def extract_indeed_job(page: Page, url: str) -> Job:
     else:
         external_id = ids[0]
 
-    title_locator = page.locator("h1.jobsearch-JobInfoHeader-title, h1").first
+    title_locator = page.locator('[data-testid="vj-job-title"]').first
+    if not title_locator.count():
+        title_locator = page.locator("h1.jobsearch-JobInfoHeader-title, h1").first
     title = title_locator.inner_text().strip() if title_locator.count() > 0 else "Vaga Indeed"
 
     company_locator = page.locator('[data-company-name="true"], .jobsearch-InlineCompanyRating-companyHeader').first
     company = company_locator.inner_text().strip() if company_locator.count() > 0 else "Empresa Indeed"
+    metadata = page.locator('[data-testid="company-info-metadata"]').first
+    metadata_lines = metadata.inner_text().strip().splitlines() if metadata.count() else []
+    if company == "Empresa Indeed" and metadata_lines:
+        company = metadata_lines[0].strip()
 
     desc_locator = page.locator("#jobDescriptionText").first
-    description = desc_locator.inner_text().strip() if desc_locator.count() > 0 else page.inner_text("body").strip()
+    if not desc_locator.count():
+        desc_locator = page.locator('[data-testid="viewjob-job-content"]').first
+    if not desc_locator.count() or title == "Vaga Indeed":
+        raise ValueError("Anúncio Indeed ausente ou layout não reconhecido; triagem interrompida.")
+    description = desc_locator.inner_text().strip()
 
     loc_locator = page.locator('[data-testid="job-location"], .jobsearch-JobInfoHeader-subtitle div').first
     location = loc_locator.inner_text().strip() if loc_locator.count() > 0 else None
+    if location is None:
+        location = next((line.strip() for line in metadata_lines
+                         if re.search(r",\s*[A-Z]{2}\b", line)), None)
 
     desc_lower = f"{title} {description}".lower()
     if "remoto" in desc_lower or "remote" in desc_lower:

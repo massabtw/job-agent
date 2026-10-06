@@ -15,6 +15,7 @@ def skill(value: str) -> str:
         "c#": "dotnet", ".net": "dotnet", "csharp": "dotnet", "c sharp": "dotnet",
         "dotnet": "dotnet", "rest": "rest", "apis rest": "rest", "api rest": "rest",
         "sql server": "sql", "mssql": "sql",
+        "inteligencia artificial": "ia", "artificial intelligence": "ia", "ai": "ia",
     }.get(value, value)
 
 
@@ -25,12 +26,34 @@ def evaluate(job: Job, profile: Profile) -> Evaluation:
     is_junior_target = target_seniority == "junior"
     junior = job.seniority in ({"junior", "entry"} if is_junior_target else {"intern", "trainee", "junior", "entry"})
     title = normalize(job.title)
-    score = min(100, (25 if junior else 0) + (35 if "dotnet" in stack & known else 0)
+    primary = bool({"dotnet", "python", "ia"} & stack & known)
+    target_role = bool(re.search(r"backend|back.end|desenvolvedor|developer|\bia\b|inteligencia artificial", title))
+    score = min(100, (25 if junior else 0) + (35 if primary else 0)
                 + (15 if re.search(r"backend|back.end", title) else 0)
                 + sum(5 for s in ("sql", "rest", "git", "azure", "arquitetura de software")
                       if s in stack & known))
+    if junior and primary and target_role:
+        score = max(score, 80)
     incompatible = []
     unknown = []
+    description = normalize(job.description)
+    if is_junior_target and re.search(
+        r"(?:tipo de vaga|contratacao|regime)\s*:\s*(?:estagio|aprendiz|temporario)", description
+    ):
+        incompatible.append("Tipo de contratação fora do perfil CLT/PJ.")
+    minimum = profile.facts.get("minimum_monthly_salary")
+    if type(minimum) is int:
+        # Only labelled monthly BRL amounts; never interpret yearly/hourly pay as monthly.
+        for line in job.description.splitlines():
+            clean = normalize(line)
+            if not re.search(r"salario|remuneracao", clean) or not re.search(r"por mes|mensal", clean):
+                continue
+            amounts = re.findall(r"r\$\s*([0-9]+(?:\.[0-9]{3})*(?:,[0-9]{2})?)", clean)
+            values = [float(value.replace(".", "").replace(",", ".")) for value in amounts]
+            if values and max(values) < minimum:
+                incompatible.append("Salário mensal divulgado abaixo do mínimo aceito.")
+            elif values and min(values) < minimum:
+                unknown.append("Faixa salarial exige confirmação do mínimo aceito.")
     if is_junior_target and (
         job.seniority in {"intern", "trainee"} or re.search(r"\b(estagio|estagiario|trainee|intern)\b", title)
     ):
@@ -85,7 +108,10 @@ def evaluate(job: Job, profile: Profile) -> Evaluation:
     if job.mode != "remote":
         if not job.location or not profile.preferred_locations:
             unknown.append("Localização não confirmada.")
-        elif normalize(job.location) not in {normalize(x) for x in profile.preferred_locations}:
+        elif normalize(job.location) not in {normalize(x) for x in profile.preferred_locations} and not (
+            normalize(job.location) in {"curitiba - pr", "curitiba, pr", "curitiba, parana", "curitiba, parana, brasil"}
+            and "curitiba" in {normalize(x) for x in profile.preferred_locations}
+        ):
             incompatible.append("Localização não aceita.")
     for question in job.questions:
         if not profile.answers.get(question, "").strip():

@@ -1,8 +1,10 @@
 # Job Agent — ambiente Python
 
-Primeira versão executável de triagem factual e histórico de candidaturas.
-Busca anúncios reais na API pública da Remotive e importa anúncios estruturados
-Gupy/Indeed. Avalia por regras e gera relatório.
+Agente de busca, triagem e candidatura com foco no **Indeed**.
+O fluxo ativo de navegador (login, busca, inspeção, aprovação e envio) é exclusivo
+do Indeed. A importação e os registros antigos de outras fontes permanecem por
+compatibilidade, mas não autorizam envio nesses portais. A descoberta Remotive
+continua separada, como fonte auxiliar de triagem.
 Os comandos de triagem não acessam contas nem enviam candidaturas. Há também
 comandos experimentais de navegador com sessão persistente; não utilizam IA.
 O envio é bloqueado enquanto disponibilidade e requisitos não forem comprovados.
@@ -74,8 +76,8 @@ A extração registra tecnologias mencionadas e sinais de senioridade com trecho
 Não promove diferenciais a requisitos, não extrai uma lista completa de obrigatórios
 e não comprova elegibilidade. requirements_verified continua false e active desconhecido.
 Restrições geográficas são preservadas; remoto não significa elegibilidade mundial.
-O comando discover não coleta Gupy/Indeed. A busca nesses portais é experimental
-e separada, pelo comando search.
+O comando discover não coleta Indeed. A busca no Indeed é experimental
+e separada, pelo comando search (Indeed é o padrão).
 discover executa uma busca por comando: ainda não há agendamento online automático.
 
 ### Executar exemplo local
@@ -134,7 +136,7 @@ Importe a vaga antes e registre uma confirmação real usando sua chave platafor
 
 ```powershell
 Set-Location 'C:\Users\m84832\Desktop\job-agent'
-& '.\.venv\Scripts\python.exe' -X utf8 -m job_agent record-history --key 'gupy:ID_REAL' --status SUBMITTED --evidence 'Comprovante real do portal'
+& '.\.venv\Scripts\python.exe' -X utf8 -m job_agent record-history --key 'indeed:ID_REAL' --status SUBMITTED --evidence 'Comprovante real do portal'
 ```
 
 Esse comando não envia nem verifica o comprovante; registra a declaração do usuário.
@@ -204,10 +206,18 @@ Use `python -m job_agent <comando> --help` para os argumentos.
   revisão factual e autorização explícita pelo comando approve.
 - process-queue considera somente READY e revalida antes do envio. Pendências
   retornam a NEEDS_REVIEW com evidência; não altere o banco para contornar validações.
-- URLs precisam ser HTTPS de domínios Gupy/Indeed, sem credenciais e porta alternativa.
+- URLs do fluxo ativo precisam ser HTTPS do Indeed, sem credenciais e porta alternativa.
   Redirecionamentos são conferidos antes de preencher e enviar dados.
-- Respostas exigem correspondência exata da pergunta. Checkboxes não são marcados
-  automaticamente; consentimentos e campos não resolvidos interrompem o fluxo.
+- Respostas exigem correspondência exata da pergunta, sem inferir dados pessoais
+  a partir de palavras soltas. Labels explícitos, implícitos e ARIA compartilham
+  a mesma identificação na inspeção e no preenchimento.
+- Selects usam o texto exato de uma única opção habilitada; rádios usam a pergunta
+  do grupo (legend) e o texto exato da opção. Consentimentos só são marcados com
+  resposta explícita (Sim/Yes/Aceito/I agree) para aquele texto no perfil.
+  Controles não resolvidos interrompem o fluxo; não são escolhidos por aproximação.
+- Perguntas salariais podem prosseguir com resposta aprovada e campos identificados.
+- process-queue continua após falha individual e retorna código 1 se houver erro
+  ou envio incerto. Reservas existentes continuam bloqueando novas tentativas.
 - Upload exige caminho absoluto e SHA-256; não basta identity_complete=true.
 - Antes do clique final, histórico e reserva transacional bloqueiam repetições.
   Cada lote permite 1 a 5 tentativas; envio incerto também ocupa a posição.
@@ -224,11 +234,11 @@ Execute no diretório C:\Users\m84832\Desktop\job-agent:
 
 ```powershell
 & 'C:\Users\m84832\Desktop\job-agent\.venv\Scripts\python.exe' -m job_agent review
-& 'C:\Users\m84832\Desktop\job-agent\.venv\Scripts\python.exe' -m job_agent review --key 'gupy:123'
-& 'C:\Users\m84832\Desktop\job-agent\.venv\Scripts\python.exe' -m job_agent review --key 'gupy:123' --note 'Requisitos ainda precisam de conferência'
+& 'C:\Users\m84832\Desktop\job-agent\.venv\Scripts\python.exe' -m job_agent review --key 'indeed:123'
+& 'C:\Users\m84832\Desktop\job-agent\.venv\Scripts\python.exe' -m job_agent review --key 'indeed:123' --note 'Requisitos ainda precisam de conferência'
 ```
 
-Use a chave real listada pelo comando, não necessariamente gupy:123. review lista
+Use a chave real listada pelo comando, não necessariamente indeed:123. review lista
 pendências da fila, reservas/interrupções e histórico externo incerto. Com --key,
 exibe os dados armazenados da vaga, fila, histórico e notas cronológicas.
 Esses dados são snapshots locais, não comprovação atualizada do anúncio.
@@ -238,7 +248,7 @@ não mudam requisitos, não promovem a READY e não removem bloqueios.
 Somente depois de conferir manualmente uma confirmação real no portal:
 
 ```powershell
-& 'C:\Users\m84832\Desktop\job-agent\.venv\Scripts\python.exe' -m job_agent reconcile --key 'gupy:123' --evidence 'Confirmação real conferida no portal; referência do comprovante'
+& 'C:\Users\m84832\Desktop\job-agent\.venv\Scripts\python.exe' -m job_agent reconcile --key 'indeed:123' --evidence 'Confirmação real conferida no portal; referência do comprovante'
 ```
 
 reconcile aceita somente envio explicitamente SUBMISSION_UNCERTAIN, na fila ou no
@@ -275,7 +285,7 @@ nem altera retroativamente anúncios já persistidos no banco.
 
 ## Perguntas visíveis do formulário
 
-A inspeção Gupy/Indeed registra em questions os textos associados a campos visíveis
+A inspeção Indeed registra em questions os textos associados a campos visíveis
 e habilitados dentro de elementos form. São reconhecidos labels explícitos/implícitos,
 aria-label e referências aria-labelledby. Cada pergunta inclui evidência textual
 visible_form_question, sem ler valores ou respostas já preenchidos.
@@ -285,7 +295,8 @@ busca, senha, arquivo, botões e campos ocultos/desabilitados não viram pergunt
 Perguntas sem resposta aprovada correspondente no perfil mantêm NEEDS_REVIEW.
 Campos sem label reconhecido geram unlabelled_control_needs_review e bloqueiam
 READY, mesmo que os demais requisitos tenham sido revisados.
-Nenhuma resposta é inventada e esta etapa não preenche selects, rádios ou consentimentos.
+Nenhuma resposta é inventada. A inspeção apenas identifica campos; o preenchimento
+usa respostas aprovadas, incluindo selects, rádios e consentimentos específicos.
 
 Isso é uma inspeção parcial da página atual: não avança etapas, não abre modais,
 não percorre iframes e não comprova que todas as perguntas foram encontradas.
@@ -304,7 +315,7 @@ somente sua própria conta. CAPTCHA, MFA, testes e consentimentos não aprovados
 No diretório C:\Users\m84832\Desktop\job-agent, exporte uma vaga:
 
 ```powershell
-& 'C:\Users\m84832\Desktop\job-agent\.venv\Scripts\python.exe' -m job_agent inspect --url 'https://empresa.gupy.io/jobs/123' --output 'C:\Users\m84832\Desktop\job-agent\data\reviewed-jobs.json'
+& 'C:\Users\m84832\Desktop\job-agent\.venv\Scripts\python.exe' -m job_agent inspect --url 'https://br.indeed.com/viewjob?jk=123' --output 'C:\Users\m84832\Desktop\job-agent\data\reviewed-jobs.json'
 ```
 
 Substitua a URL pela vaga real. O arquivo exportado é uma lista de objetos Job.
@@ -334,7 +345,7 @@ confira queue antes de repetir. Históricos e reservas existentes não são libe
 Para testar o preenchimento sem clicar no envio final:
 
 ```powershell
-& 'C:\Users\m84832\Desktop\job-agent\.venv\Scripts\python.exe' -m job_agent auto-apply --url 'https://empresa.gupy.io/jobs/123' --no-submit
+& 'C:\Users\m84832\Desktop\job-agent\.venv\Scripts\python.exe' -m job_agent auto-apply --url 'https://br.indeed.com/viewjob?jk=123' --no-submit
 ```
 
 O modo --no-submit não envia a candidatura, mas preenche dados e pode carregar currículo
@@ -346,8 +357,9 @@ exigindo nova aprovação para process-queue. Para envio real, após autorizar c
 ```
 
 Esse último comando **pode enviar candidaturas reais**. Reutiliza sessão autenticada
-do comando login. A implementação atual suporta formulário simples Gupy e até seis
-etapas Indeed, sem cobrir todas as variações/modais/iframes dos portais.
+do comando login. A implementação atual suporta até seis etapas Indeed, sem cobrir
+todas as variações/modais/iframes do portal. A Gupy não faz parte do fluxo ativo;
+registros e código legado são mantidos apenas para compatibilidade.
 A descrição, título, empresa, modalidade, localidade e experiência mínima atuais
 precisam coincidir com a aprovação. Mudança, encerramento, aprovação expirada ou perfil
 alterado impedem reutilizar a revisão. Perguntas que aparecem após abrir o formulário
@@ -355,3 +367,32 @@ são reavaliadas antes do preenchimento e também precisam de respostas aprovada
 Somente confirmação explícita após o clique resulta em SUBMITTED; ausência de
 confirmação vira SUBMISSION_UNCERTAIN. O histórico/reserva impede repetição.
 Use review para pendências e reconcile apenas após comprovar um envio incerto.
+
+### Preferências e busca autônoma
+
+O perfil local está configurado para júnior/entrada, sem estágio/trainee, CLT/PJ,
+presencial/híbrido somente em Curitiba (não inclui região metropolitana) e remoto
+de qualquer cidade, sujeito às restrições geográficas da vaga. Python e IA também
+pontuam como tecnologias principais, sem exigir .NET. Conhecimento declarado não
+é convertido em anos de experiência.
+
+O mínimo configurado é R$ 3.500 mensais. A triagem reconhece valores em reais
+explicitamente identificados como salário/remuneração mensal na descrição: máximo
+abaixo do mínimo descarta; faixa que atravessa o mínimo exige revisão. Não converte
+valores anuais/horários e não garante detectar salário em componentes separados
+da descrição. Salário não divulgado permanece elegível; ausência não comprova o valor.
+Respostas salariais só são usadas nas perguntas exatas cadastradas no perfil.
+
+Sem `--queries`, autopilot planeja buscas de backend, .NET, Python e IA conforme
+o perfil, combinando Curitiba com buscas nacionais acrescidas de "remoto".
+Não é necessário fornecer links. As vagas encontradas continuam sujeitas à
+triagem factual e aprovação; esta atualização não elimina pendências de requisitos.
+
+```powershell
+& 'C:\Users\m84832\Desktop\job-agent\.venv\Scripts\python.exe' -m job_agent autopilot --no-submit --limit 3 --max-applies 1
+```
+
+CAPTCHA/autenticação interrompem as buscas sem tentar contornar o bloqueio.
+O relatório registra os termos/localidades planejados e os erros; autopilot retorna
+código de saída 1 em erro ou envio incerto. Login/desafios precisam de intervenção
+no navegador, nunca de senha compartilhada com o agente.

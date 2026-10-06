@@ -48,6 +48,7 @@ def extract(title: str, html: str) -> tuple[str, list[str], str, list[dict[str, 
         ".NET": r"(?i)(?<!\w)\.net\b", "C#": r"(?i)\bc#",
         "SQL": r"(?i)\bsql\b", "Git": r"(?i)\bgit\b", "Azure": r"(?i)\bazure\b",
         "APIs REST": r"(?i)\brest(?:ful)?\b", "Python": r"(?i)\bpython\b",
+        "IA": r"(?i)\b(?:IA|AI|intelig[eê]ncia artificial|artificial intelligence)\b",
     }
     for name, pattern in patterns.items():
         for line in [title, *text.splitlines()]:

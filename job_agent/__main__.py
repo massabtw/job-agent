@@ -11,10 +11,9 @@ from playwright.sync_api import Error as PlaywrightError
 from pydantic import ValidationError
 
 from .approval import approve_jobs, reviewed_job
-from .browser.gupy import apply_gupy
 from .browser.indeed import apply_indeed
-from .browser.inspector import detect_blockers, extract_gupy_job, extract_indeed_job
-from .browser.search import search_gupy, search_indeed
+from .browser.inspector import detect_blockers, extract_indeed_job
+from .browser.search import search_indeed, search_plan
 from .browser.session import create_browser_context
 from .connectors import browser_channel, load_jobs, validate_destination
 from .discovery import discover, fetch
@@ -29,6 +28,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def guarded_apply(page, url, profile, store, batch_id, auto_submit=True, expected_key=None):
     channel = browser_channel(url)
+    if channel != "indeed":
+        raise ValueError("Automação disponível somente para Indeed; Gupy foi desativada.")
     reservation = {}
 
     def before_submit(job):
@@ -62,7 +63,7 @@ def guarded_apply(page, url, profile, store, batch_id, auto_submit=True, expecte
     if row and store.application_status(row["key"]):
         return "NEEDS_REVIEW", None, "Candidatura anterior registrada; não repetir."
     try:
-        connector = apply_gupy if channel == "gupy" else apply_indeed
+        connector = apply_indeed
         options = {}
         if store.connection.execute("SELECT 1 FROM approvals LIMIT 1").fetchone():
             options["review_job"] = lambda fresh: reviewed_job(store, fresh, profile)
@@ -144,8 +145,9 @@ def main() -> int:
 
     # Browser automation: search
     cmd_search = commands.add_parser("search")
-    cmd_search.add_argument("--platform", choices=["gupy", "indeed"], required=True)
+    cmd_search.add_argument("--platform", choices=["indeed"], default="indeed")
     cmd_search.add_argument("--query", required=True)
+    cmd_search.add_argument("--location", default="Brasil")
     cmd_search.add_argument("--limit", type=int, choices=range(1, 101), default=10)
     cmd_search.add_argument("--headless", action="store_true", default=False)
 
@@ -171,13 +173,13 @@ def main() -> int:
 
     # Browser automation: login session
     cmd_login = commands.add_parser("login")
-    cmd_login.add_argument("--url", default="https://portal.gupy.io")
+    cmd_login.add_argument("--url", default="https://br.indeed.com")
 
     # Browser automation: autopilot end-to-end
     cmd_auto = commands.add_parser("autopilot")
     cmd_auto.add_argument("--profile", type=Path, default=ROOT / "profile.json")
-    cmd_auto.add_argument("--queries", nargs="+", default=[".net junior", "c# junior", "backend junior", "desenvolvedor .net"])
-    cmd_auto.add_argument("--platforms", nargs="+", choices=["gupy", "indeed"], default=["gupy", "indeed"])
+    cmd_auto.add_argument("--queries", nargs="+", default=None)
+    cmd_auto.add_argument("--platforms", nargs="+", choices=["indeed"], default=["indeed"])
     cmd_auto.add_argument("--limit", type=int, choices=range(1, 101), default=10)
     cmd_auto.add_argument("--max-applies", type=int, choices=range(1, 6), default=5)
     cmd_auto.add_argument("--headless", action="store_true", default=False)
@@ -191,23 +193,20 @@ def main() -> int:
     try:
         if args.command == "login":
             print("Abrindo navegador com sessao persistente em data/browser_session...")
-            print("Faca login nas suas contas do Gupy e Indeed.")
+            if browser_channel(args.url) != "indeed":
+                raise ValueError("Login disponível somente para Indeed.")
+            print("Faça login na sua conta Indeed.")
             print("Quando concluir, pressione [ENTER] neste terminal ou avise o agente no chat.")
             with create_browser_context(headless=False) as ctx:
-                page_gupy = ctx.new_page()
-                page_gupy.goto("https://portal.gupy.io")
                 page_indeed = ctx.new_page()
-                page_indeed.goto("https://br.indeed.com")
+                page_indeed.goto(args.url)
                 input("Pressione [ENTER] para concluir o salvamento da sessao...")
             print("Sessao salva com sucesso!")
             return 0
         if args.command == "search":
             with create_browser_context(headless=args.headless) as ctx:
                 page = ctx.new_page()
-                if args.platform == "gupy":
-                    results = search_gupy(page, args.query, args.limit)
-                else:
-                    results = search_indeed(page, args.query, args.limit)
+                results = search_indeed(page, args.query, args.limit, location=args.location)
             print(json.dumps({
                 "platform": args.platform,
                 "query": args.query,
@@ -218,14 +217,13 @@ def main() -> int:
 
         if args.command == "inspect":
             channel = browser_channel(args.url)
+            if channel != "indeed":
+                raise ValueError("Inspeção disponível somente para Indeed.")
             profile = Profile.model_validate_json(args.profile.read_text(encoding="utf-8-sig"))
             with create_browser_context(headless=args.headless) as ctx:
                 page = ctx.new_page()
                 page.goto(args.url, wait_until="domcontentloaded", timeout=30000)
-                if channel == "gupy":
-                    job = extract_gupy_job(page, args.url)
-                else:
-                    job = extract_indeed_job(page, args.url)
+                job = extract_indeed_job(page, args.url)
                 eval_result = evaluate(job, profile)
                 blockers = detect_blockers(page)
             if args.output:
@@ -260,7 +258,8 @@ def main() -> int:
         if args.command == "process-queue":
             profile = Profile.model_validate_json(args.profile.read_text(encoding="utf-8-sig"))
             queue_items = store.queue_items()
-            eligible = [item for item in queue_items if item["state"] == "READY"][:args.limit]
+            eligible = [item for item in queue_items
+                        if item["state"] == "READY" and item["channel"] == "indeed"][:args.limit]
             batch_id = str(uuid4())
             store.create_batch(batch_id, args.limit)
             processed_results = []
@@ -268,9 +267,17 @@ def main() -> int:
                 page = ctx.new_page()
                 for item in eligible:
                     dest = item["destination"]
-                    status, job, evidence = guarded_apply(
-                        page, dest, profile, store, batch_id, expected_key=item["key"]
-                    )
+                    try:
+                        status, job, evidence = guarded_apply(
+                            page, dest, profile, store, batch_id, expected_key=item["key"]
+                        )
+                    except (PlaywrightError, OSError, ValueError, AssertionError) as error:
+                        status, evidence = "ERROR", str(error)
+                        with store.connection:
+                            store.connection.execute(
+                                "UPDATE queue SET state='NEEDS_REVIEW',evidence=? "
+                                "WHERE key=? AND state='READY'", (evidence, item["key"])
+                            )
                     processed_results.append({
                         "key": item["key"],
                         "destination": dest,
@@ -282,11 +289,13 @@ def main() -> int:
                 "results": processed_results,
             }, ensure_ascii=False, indent=2))
             store.save_report({"mode": "process_queue", "items": processed_results})
-            return 0
+            return 1 if any(item["status"] in {"ERROR", "SUBMISSION_UNCERTAIN"}
+                            for item in processed_results) else 0
 
         if args.command == "autopilot":
             profile = Profile.model_validate_json(args.profile.read_text(encoding="utf-8-sig"))
-            queries = args.queries or [".net junior", "c# junior", "backend junior", "desenvolvedor .net"]
+            planned_searches = search_plan(profile, args.queries)
+            queries = list(dict.fromkeys(query for query, _ in planned_searches))
             print("=== Piloto Automático Iniciado ===")
             print(f"Buscando vagas para: {profile.identity.get('full_name', 'Candidato')}")
             print(f"Termos: {', '.join(queries)}")
@@ -300,23 +309,17 @@ def main() -> int:
 
             with create_browser_context(headless=args.headless) as ctx:
                 page = ctx.new_page()
-                for q in queries:
-                    if "gupy" in args.platforms:
-                        print(f"Buscando na Gupy: '{q}'...")
-                        try:
-                            g_res = search_gupy(page, q, limit=args.limit)
-                            all_found.extend(g_res)
-                            print(f"  -> Encontradas {len(g_res)} vagas na Gupy.")
-                        except (PlaywrightError, OSError, ValueError) as err:
-                            errors.append(f"Erro Gupy '{q}': {err}")
+                for q, location in planned_searches:
                     if "indeed" in args.platforms:
-                        print(f"Buscando no Indeed: '{q}'...")
+                        print(f"Buscando no Indeed: '{q}' em {location}...")
                         try:
-                            i_res = search_indeed(page, q, limit=args.limit)
+                            i_res = search_indeed(page, q, limit=args.limit, location=location)
                             all_found.extend(i_res)
                             print(f"  -> Encontradas {len(i_res)} vagas no Indeed.")
                         except (PlaywrightError, OSError, ValueError) as err:
-                            errors.append(f"Erro Indeed '{q}': {err}")
+                            errors.append(f"Erro Indeed '{q}' em {location}: {err}")
+                            if "intervenção humana" in str(err):
+                                break
 
                 unique_jobs = {}
                 for item in all_found:
@@ -369,6 +372,8 @@ def main() -> int:
 
             summary = {
                 "queries": queries,
+                "planned_searches": [{"query": query, "location": location}
+                                     for query, location in planned_searches],
                 "total_found": len(all_found),
                 "unique": len(unique_jobs),
                 "applied_count": len(applied),
@@ -388,7 +393,8 @@ def main() -> int:
                 "pendentes_revisao": len(needs_review),
                 "erros": len(errors),
             }, ensure_ascii=False, indent=2))
-            return 0
+            return 1 if errors or any(item["status"] == "SUBMISSION_UNCERTAIN"
+                                     for item in needs_review) else 0
 
         if args.command == "discover":
             payload, cached = fetch(ROOT / "data" / "remotive-cache.sqlite3")

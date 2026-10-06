@@ -11,8 +11,8 @@ from job_agent.models import Profile
 from job_agent.storage import Store
 
 
-@pytest.mark.parametrize("platform", ["gupy", "indeed"])
-@pytest.mark.parametrize("change", ["none", "description", "profile", "closed", "question", "expired"])
+@pytest.mark.parametrize("platform", ["indeed"])
+@pytest.mark.parametrize("change", ["none", "controls", "modern_apply", "external_apply", "description", "profile", "closed", "question", "expired"])
 def test_approve_then_real_connector_submission(tmp_path, monkeypatch, capsys, platform, change):
     url = ("https://x.gupy.io/jobs/123" if platform == "gupy"
            else "https://br.indeed.com/viewjob?jk=123")
@@ -25,6 +25,14 @@ def test_approve_then_real_connector_submission(tmp_path, monkeypatch, capsys, p
                   "country": "Brasil", "city": "Curitiba"},
         resume_path=str(resume), resume_sha256=hashlib.sha256(resume.read_bytes()).hexdigest(),
     )
+    if change == "controls":
+        profile.answers = {
+            "Qual sua pretensão salarial?": "5000",
+            "Turno?": "Manhã",
+            "Aceita viajar?": "Não",
+            "Li e aceito estes termos": "Sim",
+            "Qual o nome da sua última empresa?": "Empresa correta",
+        }
     profile_path = tmp_path / "profile.json"
     profile_path.write_text(profile.model_dump_json(), encoding="utf-8")
     db = tmp_path / "db.sqlite3"
@@ -40,6 +48,34 @@ def test_approve_then_real_connector_submission(tmp_path, monkeypatch, capsys, p
         <input type="file" required>
         <button type="button" onclick="window.sent=(window.sent||0)+1;
             document.body.innerHTML='<p>Candidatura enviada!</p>'">Enviar candidatura</button></form>'''
+    if change in {"modern_apply", "external_apply"}:
+        destination = ("https://smartapply.indeed.com/start" if change == "modern_apply"
+                       else "https://example.com/start")
+        html = html.replace(f'<button {button_attr} onclick=',
+                            f'<a data-testid="viewjob-indeed-apply" href="{destination}" onclick=')
+        html = html.replace("document.getElementById('form').hidden=false",
+                            "event.preventDefault();document.getElementById('form').hidden=false")
+        html = html.replace('Candidatar-se</button>', 'Candidatar-se</a>')
+    if change == "controls":
+        html = html.replace('<input type="file" required>', '''
+            <input type="file" required>
+            <input id="salary" aria-label="Qual sua pretensão salarial?" required>
+            <label for="shift">Turno?</label><select id="shift" required>
+            <option value="">Escolha</option><option value="am">Manhã</option></select>
+            <fieldset><legend>Aceita viajar?</legend>
+            <label><input type="radio" name="travel" value="yes" required>Sim</label>
+            <label><input type="radio" name="travel" value="no" required>Não</label></fieldset>
+            <label><input id="terms" type="checkbox" required>Li e aceito estes termos</label>
+            <label>Qual o nome da sua última empresa?<input id="company" required></label>
+        ''')
+        html = html.replace('window.sent=(window.sent||0)+1;', '''
+            if (document.getElementById('salary').value !== '5000' ||
+                document.getElementById('shift').value !== 'am' ||
+                !document.querySelector('[value=no]').checked ||
+                !document.getElementById('terms').checked ||
+                document.getElementById('company').value !== 'Empresa correta') return;
+            window.sent=(window.sent||0)+1;
+        ''')
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         try:
@@ -78,7 +114,7 @@ def test_approve_then_real_connector_submission(tmp_path, monkeypatch, capsys, p
                 html = html.replace('<input type="file" required>',
                     '<input type="file" required><label for="question">Aceita viajar?</label>'
                     '<input id="question">')
-            page.route(url, lambda route: route.fulfill(body=html))
+            page.route(url, lambda route: route.fulfill(body=html, content_type="text/html; charset=utf-8"))
 
             @contextmanager
             def context(**kwargs):
@@ -95,8 +131,8 @@ def test_approve_then_real_connector_submission(tmp_path, monkeypatch, capsys, p
             report = json.loads(capsys.readouterr().out)
             store = Store(db)
             try:
-                if change == "none":
-                    assert report["results"][0]["status"] == "SUBMITTED"
+                if change in {"none", "controls", "modern_apply"}:
+                    assert report["results"][0]["status"] == "SUBMITTED", report
                     assert store.application_status(f"{platform}:123") == "SUBMITTED"
                     assert store.queue_items()[0]["state"] == "SUBMITTED"
                     monkeypatch.setattr("sys.argv", ["job_agent", "--db", str(db),
@@ -107,6 +143,8 @@ def test_approve_then_real_connector_submission(tmp_path, monkeypatch, capsys, p
                     assert report["results"][0]["status"] != "SUBMITTED"
                     assert store.application_status(f"{platform}:123") is None
                     assert page.evaluate("window.sent || 0") == 0
+                    if change == "external_apply":
+                        assert page.locator("#form").evaluate("form => form.hidden")
             finally:
                 store.close()
         finally:
