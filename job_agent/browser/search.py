@@ -18,16 +18,30 @@ def search_gupy(page: Page, query: str, limit: int = 10) -> list[dict]:
     results: list[dict] = []
     seen_ids: set[str] = set()
 
-    links = page.locator('a[href*="/jobs/"], a[href*="/vagas/"]').all()
+    links = page.locator('a[href*="/job"], a[href*="/vagas/"]').all()
     for link in links:
         if len(results) >= limit:
             break
         href = link.get_attribute("href") or ""
-        match = re.search(r"/(?:jobs|vagas)/(\d+)", href)
-        if not match:
-            continue
-        external_id = match.group(1)
-        if external_id in seen_ids:
+        external_id = None
+        match = re.search(r"/(?:jobs|job|vagas)/(\d+)", href)
+        if match:
+            external_id = match.group(1)
+        else:
+            match_b64 = re.search(r"/job/([A-Za-z0-9_\-=]+)", href)
+            if match_b64:
+                token = match_b64.group(1)
+                try:
+                    import base64
+                    import json
+                    padded = token + "=" * (-len(token) % 4)
+                    payload = json.loads(base64.urlsafe_b64decode(padded))
+                    if "jobId" in payload:
+                        external_id = str(payload["jobId"])
+                except (ValueError, KeyError):
+                    external_id = None
+
+        if not external_id or external_id in seen_ids:
             continue
         seen_ids.add(external_id)
 

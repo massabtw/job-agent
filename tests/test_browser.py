@@ -249,8 +249,23 @@ def test_apply_gupy_blocked_captcha(test_profile):
         browser.close()
 
 
-def test_apply_gupy_success(test_profile):
+def test_apply_gupy_success(test_profile, monkeypatch, tmp_path):
+    import job_agent.browser.gupy as connector
     from job_agent.browser.gupy import apply_gupy
+    from job_agent.models import Job
+
+    # Fully reviewed fixture; browser extraction alone cannot authorize submission.
+    test_profile.identity["country"] = "Brasil"
+    test_profile.history_complete = True
+    test_profile.identity_complete = True
+    test_profile.skills = [".NET", "SQL", "APIs REST", "Git", "Azure"]
+    reviewed = Job(platform="gupy", external_id="333",
+                   url="https://empresa.gupy.io/jobs/333", company="Tech Sul",
+                   title="Backend .NET Junior", seniority="junior", stack=test_profile.skills,
+                   description="Fixture revisada", mode="remote", active=True,
+                   requirements_verified=True)
+    monkeypatch.setattr(connector, "extract_gupy_job", lambda *args: reviewed)
+    monkeypatch.setattr(connector, "SCREENSHOTS_DIR", tmp_path)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -272,14 +287,16 @@ def test_apply_gupy_success(test_profile):
                             <input name="fullName" id="name" />
                             <input name="email" id="email" />
                             <input name="phone" id="phone" />
-                            <input type="checkbox" id="terms" />
                             <button type="submit" onclick="document.body.innerHTML='Candidatura enviada!'">Enviar candidatura</button>
                         </div>
                     </body>
                 </html>
             """,
         ))
-        status, job, evidence = apply_gupy(page, "https://empresa.gupy.io/jobs/333", test_profile, auto_submit=True)
+        status, job, evidence = apply_gupy(
+            page, "https://empresa.gupy.io/jobs/333", test_profile, auto_submit=True,
+            before_submit=lambda job: None,
+        )
         assert status == "SUBMITTED"
         assert job is not None
         assert "Candidatura submetida na Gupy" in evidence

@@ -28,7 +28,7 @@ def _match_identity_value(label_or_name: str, identity: dict[str, str]) -> str |
 def _find_answer(question_text: str, answers: dict[str, str]) -> str | None:
     q_norm = question_text.strip().lower()
     for key, val in answers.items():
-        if key.strip().lower() in q_norm or q_norm in key.strip().lower():
+        if q_norm and key.strip().lower() == q_norm:
             return val
     return None
 
@@ -39,6 +39,9 @@ def fill_form(page: Page, profile: Profile) -> dict[str, str]:
     inputs = page.locator("input:not([type='hidden']):not([type='submit']):not([type='file']), textarea").all()
 
     for inp in inputs:
+        if (not inp.is_visible() or not inp.is_enabled()
+                or inp.get_attribute("type") in {"checkbox", "radio", "password", "button", "reset"}):
+            continue
         inp_id = inp.get_attribute("id") or ""
         inp_name = inp.get_attribute("name") or ""
         placeholder = inp.get_attribute("placeholder") or ""
@@ -80,7 +83,9 @@ def upload_resume(page: Page, profile: Profile) -> bool:
     content = resume_file.read_bytes()
     computed_hash = hashlib.sha256(content).hexdigest()
 
-    if profile.resume_sha256 and computed_hash.lower() != profile.resume_sha256.lower():
+    if not resume_file.is_absolute() or not profile.resume_sha256:
+        raise ValueError("Currículo exige caminho absoluto e SHA-256 confirmado.")
+    if computed_hash.lower() != profile.resume_sha256.lower():
         raise ValueError(
             "Falha na validação de integridade: o hash SHA-256 do currículo "
             "não corresponde ao registrado no perfil."

@@ -6,6 +6,18 @@ from urllib.parse import parse_qs, urlparse
 from .models import Job
 
 
+def browser_channel(url: str) -> str:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if (parsed.scheme != "https" or parsed.username or parsed.password
+            or parsed.port not in {None, 443}):
+        raise ValueError("Destino precisa usar HTTPS padrão, sem credenciais.")
+    for channel, domain in (("gupy", "gupy.io"), ("indeed", "indeed.com")):
+        if host == domain or host.endswith("." + domain):
+            return channel
+    raise ValueError("Domínio de candidatura não autorizado.")
+
+
 def validate_source(job: Job) -> str:
     """Canonical portal identifier; tracking parameters cannot bypass deduplication."""
     parsed = urlparse(str(job.url))

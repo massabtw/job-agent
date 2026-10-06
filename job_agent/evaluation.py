@@ -90,6 +90,9 @@ def evaluate(job: Job, profile: Profile) -> Evaluation:
     for question in job.questions:
         if not profile.answers.get(question, "").strip():
             unknown.append(f"Pergunta sem resposta aprovada: {question}")
+    if any(item.get("classification") == "unlabelled_control_needs_review"
+           for item in job.extraction_evidence):
+        unknown.append("Campo de formulário sem identificação: revisão humana obrigatória.")
     if not profile.history_complete:
         unknown.append("Histórico anterior de candidaturas não confirmado.")
     if not profile.identity_complete:

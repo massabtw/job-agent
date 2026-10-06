@@ -5,10 +5,13 @@ from pathlib import Path
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page
 
+from ..connectors import browser_channel, validate_source
 from ..evaluation import evaluate
 from ..models import Job, Profile
+from ..profile_validation import profile_blockers
 from .filler import fill_form, upload_resume
-from .inspector import detect_blockers, extract_gupy_job
+from .inspector import detect_blockers, extract_gupy_job, extract_questions
+from .safety import form_pending, submit_confirmed, validate_page
 from .session import safe_goto
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,10 +33,15 @@ def apply_gupy(
     url: str,
     profile: Profile,
     auto_submit: bool = True,
+    before_submit=None,
+    review_job=None,
 ) -> tuple[str, Job | None, str]:
     """Execute evaluation and autonomous application on Gupy."""
+    if browser_channel(url) != "gupy":
+        raise ValueError("URL não pertence à Gupy.")
     safe_goto(page, url)
     page.wait_for_timeout(2000)
+    validate_page(page, "gupy")
 
     # 1. Pre-check for anti-bot challenges
     blockers = detect_blockers(page)
@@ -48,9 +56,15 @@ def apply_gupy(
         shot = save_diagnostic_screenshot(page, "gupy_extract_error")
         return "ERROR", None, f"Falha ao extrair dados da vaga: {exc}. Screenshot: {shot}"
 
+    if review_job is not None:
+        job = review_job(job)
     eval_result = evaluate(job, profile)
-    if eval_result.status == "DISCARDED":
-        return "DISCARDED", job, f"Critérios não atendidos: {'; '.join(eval_result.reasons)}"
+    validate_source(job)
+    if eval_result.status != "READY":
+        return eval_result.status, job, f"Critérios não atendidos: {'; '.join(eval_result.reasons)}"
+    reasons = profile_blockers(profile)
+    if reasons or blockers:
+        return "NEEDS_REVIEW", job, "; ".join(reasons + blockers)
 
     # 3. Locate and click apply button
     apply_btn = page.locator(
@@ -65,6 +79,7 @@ def apply_gupy(
     else:
         apply_btn.click()
         page.wait_for_timeout(2000)
+    validate_page(page, "gupy")
 
     # 4. Check for blockers inside application flow (Auth/Login or Captcha)
     step_blockers = detect_blockers(page)
@@ -74,37 +89,46 @@ def apply_gupy(
     if "CAPTCHA" in step_blockers:
         shot = save_diagnostic_screenshot(page, "gupy_flow_captcha")
         return "BLOCKED_CAPTCHA", job, f"Desafio antibot na tela de formulário. Screenshot: {shot}"
+    if step_blockers:
+        return "NEEDS_REVIEW", job, "; ".join(step_blockers)
 
     # 5. Fill application inputs and upload resume
+    questions, question_evidence = extract_questions(page)
+    job = job.model_copy(update={
+        "questions": list(dict.fromkeys(job.questions + questions)),
+        "extraction_evidence": job.extraction_evidence + question_evidence,
+    })
+    if evaluate(job, profile).status != "READY":
+        return "NEEDS_REVIEW", job, "Perguntas do formulário exigem respostas aprovadas."
     fill_form(page, profile)
     try:
         upload_resume(page, profile)
     except ValueError as exc:
         return "ERROR", job, f"Erro no currículo: {exc}"
 
-    # 6. Accept mandatory LGPD / terms checkboxes if present
-    terms = page.locator('input[type="checkbox"]').all()
-    for cb in terms:
-        if not cb.is_checked():
-            with contextlib.suppress(PlaywrightError):
-                cb.check(timeout=1000)
+    # Consent is never inferred, even for apparently mandatory terms.
+    if form_pending(page):
+        return "NEEDS_REVIEW", job, "Campos ou consentimentos exigem revisão humana."
 
     if not auto_submit:
         return "NEEDS_REVIEW", job, "Formulário preenchido com sucesso; aguardando confirmação manual."
 
     # 7. Autonomous submission click
     submit_btn = page.locator(
-        'button:has-text("Enviar candidatura"), button:has-text("Confirmar"), '
-        'button:has-text("Finalizar"), button[type="submit"]'
+        'button:has-text("Enviar candidatura")'
     ).first
 
     if submit_btn.count() > 0:
+        if before_submit is None:
+            return "NEEDS_REVIEW", job, "Envio exige reserva transacional."
+        denied = before_submit(job)
+        if denied:
+            return denied, job, "Histórico, reserva ou limite impede nova tentativa."
         try:
-            submit_btn.click(timeout=5000)
-            page.wait_for_timeout(3000)
+            confirmation = submit_confirmed(page, submit_btn, "gupy")
             shot = save_diagnostic_screenshot(page, "gupy_submitted")
-            return "SUBMITTED", job, f"Candidatura submetida na Gupy. Comprovante: {shot}"
-        except (PlaywrightError, OSError, TimeoutError) as exc:
+            return "SUBMITTED", job, f"Candidatura submetida na Gupy: {confirmation}. Comprovante: {shot}"
+        except (PlaywrightError, OSError, TimeoutError, AssertionError, ValueError) as exc:
             shot = save_diagnostic_screenshot(page, "gupy_submit_fail")
             return "SUBMISSION_UNCERTAIN", job, f"Falha ao clicar no envio final: {exc}. Screenshot: {shot}"
 

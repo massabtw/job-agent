@@ -37,6 +37,16 @@ class Store:
                 ('NEEDS_REVIEW','READY','RESERVED','SUBMITTING','SUBMITTED','SUBMISSION_UNCERTAIN')),
                 batch_id TEXT REFERENCES batches(id), token TEXT, evidence TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS reviews (
+                id INTEGER PRIMARY KEY, key TEXT NOT NULL REFERENCES jobs(key),
+                action TEXT NOT NULL CHECK(action IN ('NOTE','RECONCILE')),
+                evidence TEXT NOT NULL, previous_evidence TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS approvals (
+                key TEXT PRIMARY KEY REFERENCES jobs(key), payload TEXT NOT NULL,
+                profile_hash TEXT NOT NULL, evidence TEXT NOT NULL, created_at TEXT NOT NULL
+            );
         """)
 
     def close(self):
@@ -101,6 +111,87 @@ class Store:
         return [dict(row) for row in self.connection.execute(
             "SELECT key, channel, destination, state, batch_id, evidence FROM queue ORDER BY key"
         )]
+
+    def review_detail(self, key: str) -> dict:
+        row = self.connection.execute("SELECT payload FROM jobs WHERE key=?", (key,)).fetchone()
+        if not row:
+            raise ValueError("Vaga desconhecida; importe a vaga antes de revisar.")
+        queued = self.connection.execute(
+            "SELECT key,channel,destination,state,batch_id,evidence FROM queue WHERE key=?", (key,)
+        ).fetchone()
+        application = self.connection.execute(
+            "SELECT status,evidence,recorded_at FROM applications WHERE key=?", (key,)
+        ).fetchone()
+        reviews = self.connection.execute(
+            "SELECT id,action,evidence,previous_evidence,created_at FROM reviews WHERE key=? ORDER BY id",
+            (key,),
+        ).fetchall()
+        return {"key": key, "job": json.loads(row["payload"]),
+                "queue": dict(queued) if queued else None,
+                "application": dict(application) if application else None,
+                "reviews": [dict(item) for item in reviews]}
+
+    def pending_reviews(self) -> list[dict]:
+        rows = self.connection.execute("""
+            SELECT j.key, j.payload, q.state, q.evidence AS queue_evidence,
+                   a.status, a.evidence AS application_evidence
+            FROM jobs j LEFT JOIN queue q ON q.key=j.key
+            LEFT JOIN applications a ON a.key=j.key
+            WHERE (q.state IN ('NEEDS_REVIEW','SUBMISSION_UNCERTAIN','RESERVED','SUBMITTING')
+                   OR a.status='SUBMISSION_UNCERTAIN')
+              AND COALESCE(a.status,'')!='SUBMITTED'
+              AND COALESCE(q.state,'')!='SUBMITTED'
+            ORDER BY j.key
+        """).fetchall()
+        return [{"key": row["key"], "title": json.loads(row["payload"])["title"],
+                 "state": row["status"] or row["state"],
+                 "evidence": row["application_evidence"] or row["queue_evidence"] or ""}
+                for row in rows]
+
+    def add_review_note(self, key: str, note: str):
+        if not note.strip():
+            raise ValueError("Nota de revisão não pode estar vazia.")
+        self.review_detail(key)
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO reviews(key,action,evidence,previous_evidence,created_at) "
+                "VALUES(?,'NOTE',?,'',?)", (key, note.strip(), datetime.now(UTC).isoformat())
+            )
+
+    def reconcile(self, key: str, evidence: str):
+        """Manual declaration only; never verify remotely or release an attempt slot."""
+        if not evidence.strip():
+            raise ValueError("Evidência de confirmação é obrigatória.")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            detail = self.review_detail(key)
+            queue = detail["queue"]
+            application = detail["application"]
+            if queue and queue["state"] in {"RESERVED", "SUBMITTING", "SUBMITTED"}:
+                raise ValueError("Estado da fila incompatível com reconciliação.")
+            if application and application["status"] != "SUBMISSION_UNCERTAIN":
+                raise ValueError("Histórico já confirmado; não sobrescrever.")
+            if not ((queue and queue["state"] == "SUBMISSION_UNCERTAIN")
+                    or (application and application["status"] == "SUBMISSION_UNCERTAIN")):
+                raise ValueError("Reconciliação exige envio explicitamente incerto.")
+            previous = json.dumps({"queue": queue, "application": application}, ensure_ascii=False)
+            now = datetime.now(UTC).isoformat()
+            self.connection.execute(
+                "INSERT INTO reviews(key,action,evidence,previous_evidence,created_at) "
+                "VALUES(?,'RECONCILE',?,?,?)", (key, evidence.strip(), previous, now)
+            )
+            self.connection.execute(
+                "INSERT INTO applications VALUES(?,'SUBMITTED',?,?) "
+                "ON CONFLICT(key) DO UPDATE SET status='SUBMITTED',evidence=excluded.evidence,"
+                "recorded_at=excluded.recorded_at", (key, evidence.strip(), now)
+            )
+            self.connection.execute(
+                "UPDATE queue SET state='SUBMITTED',evidence=? WHERE key=?", (evidence.strip(), key)
+            )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
 
     def create_batch(self, batch_id: str, limit: int = 5):
         if not batch_id.strip() or not 1 <= limit <= 5:
